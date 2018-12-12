@@ -1,0 +1,185 @@
+---
+title: "Zezula_Mateusz_Final"
+author: "Mateusz Zezula"
+date: "12/9/2018"
+output: html_document
+---
+
+## Introduction
+
+The U.S. Regional Dataset from the St. Louis Federal Reserve (link: https://fred.stlouisfed.org/categories/3008/downloaddata) contains time-series economic data for each country in the United States. The dataset amounts to 330,000 .csv files and over 500 megabytes in uncompressed form.
+
+Although the analytic possibilities of the dataset are endless, I limit myself to answering the following: How do changes in economic variables vary from state-to-state? Display those changes using a heatmap. The creation of functions that answer the above questions presupposes the existence of many supporting functions; these will be explained below.
+
+```{r setup}
+knitr::opts_knit$set(root.dir = "/users/mateuszzezula/Box/1. First Semester/Programming for Data Science/final_project/")
+library(pacman)
+p_load(magrittr, ggplot2, stringr, dplyr, reshape2, tseries, zoo, maps, tidyverse, urbnmapr, plotly, Rd2md)
+```
+
+## datasetIndex()
+The dataset includes an index file outlining every .csv file contained in the dataset. Part of the index file is shown for illustrative purposes; the format and information is self-explanatory. In addition, I manually parsed the index file and identified 33 variables of analytic interest. Any variable included in the list can be analyzed with the create.us.heatmap() and graph.diverging.lollipop() functions.
+```{r datasetIndex}
+datasetIndex <- function() {
+  main <- read.table("../final_project/Final/Zezula/README_SERIES_ID_SORT.txt", 
+                      header = T, sep = ";", quote = "", row.names = NULL, 
+                      fill = TRUE, stringsAsFactors = F)
+  subjects <- read.csv("../final_project/Final/Zezula/subjects.csv", 
+                       header = T, stringsAsFactors = F)
+  return(list(main = main, subjects = subjects))
+}
+head(datasetIndex()$main)
+datasetIndex()$subjects
+```
+
+## get.subject()
+Returns subject variable (that is, title), used as an input for other functions.
+```{r get.subject}
+get.subject <- function(index, number) {
+  subject <- index$subjects$Title[number]
+  return(subject)
+}
+get.subject(datasetIndex(), 6)
+```
+
+## get.csv()
+Parses dataset and returns csv based on inputs. Assuming that inputs are correct (and given that some counties are mislabeled or inconsistent), returns NULL upon experiencing an error. 
+```{r get.csv}
+get.csv <- function(index, title, county, state) {
+  search <- paste0(title, " ", county,", ", state)
+  filter <- dplyr::filter(index$main, Title == search)
+  clean <- stringr::str_replace_all(filter[, 1], "\\\\", "/")
+  path <- str_trim(paste0("../final_project/raw_data/data/", clean), side = "right")
+  
+  output <- tryCatch(read.csv(path, 
+                              header = T, 
+                              stringsAsFactors = F), error = function(e) NULL) 
+  return(output)
+}
+head(get.csv(datasetIndex(), get.subject(datasetIndex(), 6), "Queens County", "NY"))
+```
+
+## get.all.counties()
+Returns all counties for a particular state, regardless of year.
+```{r get.all.counties}
+get.all.counties <- function(index, state) {
+  reference.title <- index$subjects$Title[5]
+  filt.1 <- dplyr::filter(index$main, grepl(reference.title, Title))
+  filt.2 <- dplyr::filter(filt.1, grepl(state, Title))
+  counties <- filt.2$Title %>%
+    gsub(reference.title, "", .) %>% 
+    gsub(state, "", .) %>% 
+    gsub(",", "", .) %>% 
+    str_trim(side = c("both"))
+  return(counties)
+}
+get.all.counties(datasetIndex(), "AK")
+length(get.all.counties(datasetIndex(), "AK"))
+```
+
+## get.filtered.counties()
+Builds upon get.all.counties() by checking for county existence during a particular year (some counties only have data for particular years).
+```{r get.filtered.counties}
+get.filtered.counties <- function(index, state, year) {
+  counties.all <- get.all.counties(index, state)
+  counties.filt <- rep(NA, length(counties.all))
+  for (i in 1:length(counties.all)) {
+    df <- get.csv(index, "Income Inequality in", counties.all[i], state)
+    if (is.null(df)) {
+      county <- NA
+    } else {
+      df$DATE <- as.numeric(gsub("-01-01", "", df$DATE))
+      if (all(year %in% df$DATE)) {
+        county <- counties.all[i]
+      } else {
+        county <- NA 
+      }
+    }
+    counties.filt[i] <- county
+  }
+  counties.filt <- counties.filt[!is.na(counties.filt)]
+  return(counties.filt)
+}
+length(get.filtered.counties(datasetIndex(), "AK", 2015))
+```
+Evidently, Alaska has 1 county that throws an error, and will therefore be excluded from other functions. Although non-trivial, the exclusions are not sufficiently large to affect results.
+
+## df.state.average()
+Calculates state average for a particular variable for a particular state. Also instructive since it forms the foundation for other potential functions, such as one that calculates the sum of a particular variable. (Potential drawback beyond the scope of this project: counties are equal-weighted.)
+```{r df.state.average}
+df.state.average <- function(index, title, state, year) {
+  counties <- get.filtered.counties(index, state, year)
+  vector <- rep(NA, length(counties))
+  for (i in 1:length(counties)) {
+    df <- get.csv(index, title, counties[i], state)
+    if (is.null(df)) {
+      vector[i] <- 0
+    } else {
+      df$DATE <- as.numeric(gsub("-01-01", "", df$DATE))
+      vector[i] <- dplyr::filter(df, DATE == year)[, 2]
+    }
+  }
+  return(mean(vector))
+}
+df.state.average(datasetIndex(), get.subject(datasetIndex(), 6), "NY", 2015)
+```
+
+## create.us.df()
+Loops through df.state.average() function to create a 50-state data.frame for use in subsequent graphing functions.
+```{r create.us.df}
+create.us.df <- function(index, title, year) {
+  df <- setNames(data.frame(matrix(ncol = 3, nrow = length(state.abb))), c("id", "value", "region"))
+  for (i in 1:length(state.abb)) {
+    df[i, "id"] <- state.abb[i]
+    df[i, "region"] <- tolower(state.name[i])
+    df[i, "value"] <- df.state.average(index, title, state.abb[i], year)
+  }
+  return(df)
+}
+head(create.us.df(datasetIndex(), get.subject(datasetIndex(), 6), 2015))
+tail(create.us.df(datasetIndex(), get.subject(datasetIndex(), 6), 2015))
+```
+
+## create.us.heatmap()
+Creates a heatmap based on input variable. Provides an effective way of visualizing data. The power of create.us.heatmap() lies in the ability to analyze 31 additional variables. I limit myself to 2 variables for purposes of example. Note: Hawaii and Alaska are excluded on account of coding difficulties. 
+```{r create.us.heatmap, error=TRUE}
+create.us.heatmap <- function(index, title, year) {
+  df <- create.us.df(index, title, year)
+  state.data <- map_data("state")
+  df_map <- merge(state.data, df, sort = FALSE, by = "region")
+  df_map <- df_map[order(df_map$order), ]
+  
+  map <- ggplot(data = df_map, mapping = aes(long, lat, group = group, fill = value)) +
+    geom_polygon(color = NA) + 
+    coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+    labs(title = paste0(title, " ", year), x = "Longitude", y = "Latitude", fill = "Value") +
+    theme_minimal()
+  return(map)
+}
+create.us.heatmap(datasetIndex(), get.subject(datasetIndex(), 6), 2015)
+create.us.heatmap(datasetIndex(), get.subject(datasetIndex(), 5), 2015)
+```
+Per Capita Income: Most conclusions are relatively unsurprising. The southern part of the US is relatively poorer; Virginia appears to be the poorest state; the northeast, especially states such as Connecticut and Massachusetts, are relatively wealthier. Some unsurprising results include high relative incomes of Wyoming and North Dakota, which could be respectively explained by the prevalence of Jackson Hole and the shale boom.
+
+Income Inequality: Again, results are unsurprising but instructive. The Midwestern states have the lowest income inequality, whereas the southern states, and especially Louisiana, have the highest levels of inequality. Graph suggests that a further avenue for more rigorous quantitative analysis would check whether per capita income levels have any causal relation to income inequality. Note: The grey states (New Mexico and Texas) suggest an error in csv retrieval; I would need to look into this issue further.
+
+## graph.diverging.lollipop()
+Provides an alternative viewing of data. Graphically shows where a particular state is relative to the average.
+```{r graph.diverging.lollipop}
+graph.diverging.lollipop <- function(index, title, year) {
+  df <- create.us.df(index, title, year)
+  plot <- df %>% 
+    arrange(value) %>%
+    mutate(region = factor(region, region)) %>%
+    ggplot(aes(x = region, y = value)) +
+    geom_segment( aes(x = region, xend = region, y = mean(df$value), yend = value), color = "black", size = 1) +
+    geom_point(color = "black", size = 3, alpha = 0.6) +
+    labs(title = paste0(title, " ", year), x = "Value", y = "State") +
+    coord_flip() + 
+    theme_minimal()
+  return(plot)
+}
+graph.diverging.lollipop(datasetIndex(), get.subject(datasetIndex(), 6), 2016)
+```
+
+Analysis: The same data in create.us.heatmap() but represented in a different way. Pennsylvania has the average per capita income level with, for instance, Massachusetts being the highest. Hawaii being the lowest is likely an error caused by expected discontinuities with its county-level data.
