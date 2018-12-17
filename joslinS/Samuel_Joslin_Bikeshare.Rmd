@@ -1,0 +1,278 @@
+---
+title: "Capital Bikeshare 2011-2012:
+an Analysis, Visualization, and Prediction"
+author: "Samuel Joslin"
+date: "12/15/2018"
+output: pdf_document
+---
+
+
+The Capital Bikeshare provides the means for renting bicycicles through a number of automated kiosks throughout the metro DC area. People are able to rent, use, and return bicycles at different locations at their convience. 
+
+I plan to explore data from the Washington DC Capital Bikeshare through multiple visualizations and estimators. Ultimately, I create a predictive model (Stochasitic Gradient Boosting and Linear Regression) to predict the number of bikes that will be rented in the future. 
+
+```{r, message = F, warning=FALSE}
+library(dplyr, quietly = T)
+library(ggplot2, quietly = T)
+library(caret, quietly = T)
+library(lubridate, quietly = T)
+library(sqldf, quietly = T)
+library(Metrics, quietly = T)
+
+
+#Read in the bikesharing data set
+
+train <- read.csv("train.csv", header = T, 
+                 stringsAsFactors = F)
+test <- read.csv("test.csv", header = T, 
+                 stringsAsFactors = F)
+train %>% str
+```
+
+**Understanding the data**
+The "train" data.frame, as shown above, has columns that can be interpreted in this way:
+
+datetime - hourly date + timestamp  
+
+season -  1 = spring, 2 = summer, 3 = fall, 4 = winter
+
+holiday - whether the day is considered a holiday (0 for non-holiday, 1 for holiday)
+
+workingday - whether the day is neither a weekend nor holiday
+
+weather - 
+1: Clear, Few clouds, Partly cloudy, Partly cloudy 
+
+2: Mist + Cloudy, Mist + Broken clouds, Mist + Few clouds, Mist 
+
+3: Light Snow, Light Rain + Thunderstorm + Scattered clouds, Light Rain + Scattered clouds 
+
+4: Heavy Rain + Ice Pallets + Thunderstorm + Mist, Snow + Fog 
+
+temp - temperature in Celsius
+
+atemp - "feels like" temperature in Celsius
+
+humidity - relative humidity
+
+windspeed - wind speed
+
+casual - number of non-registered user rentals initiated
+
+registered - number of registered user rentals initiated
+
+count - number of total rentals
+
+The "test" data.frame has the same coulmn data as "train", except without "casual", "registered", and "count"
+
+**Putting the data in a usable form**
+My goal in the section is to put the data into a useable form such that my analysis portion runs smoothly and clearly. Fortunately, the data has no missing values and clearly labeled. However, I would like to sepretately add an "hour and "day of the week" coulmn and to transform the "temp" from Celsius to Ferenheit. In addition, I will turn four of the integer coulmns into factors for the model prediciton section, and remove the "causal" and "registered" coulmns becuse "count" = "casual" + "registered". Since we have the two data frames, "train" and "test", I generalize this process in two functions.
+
+```{r}
+##### convert celcius to ferenheit #####
+cTOf <- function(int){
+  fer <- rep(NA,length(int))
+  for (i in 1:length(int)){
+    ci <- int[i]
+    cel <- ci*(9/5)
+    fer[i] <- cel+32
+  }
+  return(fer)
+}
+
+clean_data <- function(data_frame){
+  
+  #Create a hour coulmn
+  data_frame$hour <- substr(data_frame$datetime, 12, 20) %>% as.factor
+  
+  #create day of week column
+  data_frame$weekday <- data_frame$datetime %>% as.Date %>% weekdays %>% as.factor
+  
+  #turn temps in to ferenheit
+  data_frame$temp <- cTOf(data_frame$temp)
+  
+  data_frame$season <- as.factor(data_frame$season)
+  data_frame$holiday <- as.factor(data_frame$holiday)
+  data_frame$workingday <- as.factor(data_frame$workingday)
+  data_frame$weather <- as.factor(data_frame$weather)
+  data_frame$casual <- NULL
+  data_frame$registered <- NULL
+  
+  return(data_frame)
+}
+
+train <- clean_data(train)
+test <- clean_data(test)
+```
+
+
+**Understanding the data through visualizations and estimators** 
+
+I seek to answer the question: "How does bikeshare rentals vary over the course of the year?"
+I approach this question by plotting the "month/day" days on the x-axis and an aggregate count on the y-axis for all given years. Additionally, I highlight the temperature on the given day to show the relationship between the number bikes rented on the day and the temperature. 
+
+
+```{r}
+plot_year_nRent <- function(unfactored){
+  rows <- nrow(unfactored)
+  mon_day <- rep(NA,rows)
+  for(i in 1:rows){
+    cd <- as.character(unfactored$datetime[i])
+    month <- strsplit(cd,"\\- |\\-| ")[[1]][2]
+    day <- strsplit(cd,"\\- |\\-| ")[[1]][3]
+    mon_day[i] <- paste(month,day, sep = "/")
+  }
+  
+  
+  unfactored$mon_day <- mon_day
+  
+  cl <- length(unique(unfactored$mon_day))
+  nRent <- rep(NA, cl)
+  avg_temp <- rep(NA, cl)
+  for (i in 1:cl){
+    uni_day <-unique(unfactored$mon_day)
+    cd <- uni_day[i]
+    df_filt <- dplyr::filter(unfactored, mon_day == cd)
+    nRent[i] <- sum(df_filt$count)
+    avg_temp[i] <- df_filt$temp %>% as.numeric %>% mean
+  }
+  
+  temp <- cTOf(avg_temp)
+  uni_day <- unique(unfactored$mon_day)
+  dayCount <- data.frame(uni_day,nRent,temp)
+  
+  p <- ggplot(aes(uni_day, nRent, color = temp), data = dayCount)
+  p <- p + geom_point() + theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 7))+scale_color_gradient(low="blue", high="red")+
+    ggtitle("Bikes Rented over the year")
+  return (print(p))
+}
+
+
+plot_year_nRent(train)
+```
+
+The left most x-axis tick represends 01/01 and the right most is 12/31. It is no suprise that more bikes are rented in the summer months than the winter, but something that I found interesting is that it appears that there is more variability in the count on the warmer days than the colder days. To further investigate this idea, I plan, later on, the asses the standard deviation by season. I want to assess the validity of the statement "There is less variablity in the count when the temperature cold than when the temperature is hot."
+
+Below is a function that accepts a data frame and season and returns the standard deviation of that season's count.
+
+```{r}
+sd_seasons <- function(traindf, season){
+  
+  if(season == "Spring"){
+    season2 <- 1
+  }
+  if(season == "Summer"){
+    season2 <- 2
+  }
+  if(season == "Fall"){
+    season2 <- 3
+  }
+  if(season == "Winter"){
+    season2 <- 4
+  }
+  
+  df_filt <- filter(traindf, season == season2)
+  sd <- df_filt$count %>% sd
+  return(sd)
+}
+
+sd_seasons(train,"Summer")%>% print
+sd_seasons(train,"Fall")%>% print
+sd_seasons(train,"Winter")%>% print
+sd_seasons(train,"Spring")%>% print
+```
+
+
+It appears that there is less variation in the spring than in the other months, which suggests that people more consistently rent bikes in the spring.
+
+I would also like to investigate the question: "How many bikes are rented per hour over on different days of the week". I will visualize this question by plotting the "hours" on the x-axis and the "count" on the y-axis and have a line represent the different days of the week. 
+
+```{r}
+plot_Days_Count <- function(data_frame){
+  day_hour <- sqldf::sqldf('select weekday, hour, avg(count) as count from data_frame group by weekday, hour')
+  
+  p <-ggplot(train, aes(x=hour, y=count, color=weekday))+
+    geom_line(data =day_hour, aes(group = weekday))+
+    ggtitle("Bikes Rented By Weekday")+ theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 10))
+  return(print(p))
+}
+
+plot_Days_Count(train)
+```
+
+It appears that on the weekdays people mostly use the bikes in the morning and in the afternoon, probably in accordace with a work schedule. On the weekends it apears that people steady increase the useage, peaking the afternoon. 
+
+**Regresssion and count prediction**
+
+Given the relationships we have seen in the visualizations above, it would be interesting if we could provide some sort of prediction through a model on how many bikes are rented given certain time and weather conditions. I plan to create two models to assist the predict process, Stochastic Gradient Boosting and Linear Regression. Stochastic Gradient Boosting is a decision tree based model that consists of an ensemble of weak prediction to form one strong prediction model. Linear regression provides a simple scalar relationship between the dependent and independent variables. I will evaluate the model's accuracy using the Root Mean Squared Log Error.
+
+```{r, warnings=F, message=F, cache=T}
+
+#Partition the training and validation
+inTrain <- caret::createDataPartition(y=train$count, p=0.75, list=F)
+training <- train[inTrain, ]
+validation <- train[-inTrain,]
+
+Grid <-  expand.grid( n.trees = 500, interaction.depth = 10, shrinkage = 0.05,
+                        n.minobsinnode = 10)
+
+fitControl <- trainControl(
+  method = "repeatedcv",
+  number = 6,
+  repeats = 6)
+
+regress <- count ~ season + holiday + workingday + weather + temp + humidity + windspeed + hour + weekday
+
+
+t_out_gbm <- caret::train(regress, data=training, 
+                          tuneGrid = Grid, trControl = fitControl, 
+                          method = 'gbm', maximize = F)
+
+
+t_out_lm <- caret::train(regress, data = training, 
+                         trControl = fitControl, 
+                         method = "lm")
+```
+
+
+\newpage
+
+
+```{r}
+t_out_gbm %>% print
+t_out_lm %>% print
+```
+
+A prediction is only valuable if it has a low error. Below I wrote a function that will show the Root Mean Squared Log Error.
+
+```{r, warning=F}
+prediction_error <- function(model, validation){
+  pred1 <- predict(model, validation)
+  pred1[pred1<0] <- 0
+  error <- Metrics::rmsle(validation$count,pred1)
+  return(error)
+}
+
+prediction_error(t_out_gbm, validation)  %>% print
+prediction_error(t_out_lm, validation) %>% print
+```
+
+As expected the Stochastic Gradient Boosting model has a lower error than the Linear Regression. So, I will use the Stochastic Gradient Boosting for the prediction. Below is a fucntion that makes predictions. 
+
+```{r}
+makePrediction <- function (model, test) {
+  pred <- predict(model, test)
+  pred <- round(pred)
+  pred[pred<0] <- 0
+  df <- data.frame(test$datetime, c(count=pred))
+  names(df) <- c("datetime", "count")
+  return(df)
+}
+
+makePrediction(t_out_gbm, test) %>% head %>% print 
+```
+
+
+In the future, I would like to use higher number of repeated CV to improve the model's accuracy as well as comparing these models to other methods. 
+
+As an end note, I must cite Kaggle for providing the data set, the Caret Package introduction https://topepo.github.io/caret/index.html, and Stackoverflow for providing me with information on tuning models and how to use new r functions and packages. 
